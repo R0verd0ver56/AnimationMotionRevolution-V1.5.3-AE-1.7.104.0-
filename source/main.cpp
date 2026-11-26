@@ -27,6 +27,19 @@ namespace SKSE::log
 	}
 }
 
+namespace
+{
+	void OnSKSEMessage(SKSE::MessagingInterface::Message* a_message)
+	{
+		if (a_message && (a_message->type == SKSE::MessagingInterface::kPreLoadGame ||
+							 a_message->type == SKSE::MessagingInterface::kNewGame)) {
+			hooks::ClearVerticalMotion();
+			// Every plugin has installed its hooks by now, so ours end up outermost.
+			hooks::InstallLateHooks();
+		}
+	}
+}
+
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	try {
@@ -67,7 +80,15 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
 		logger::info("Calling hooks::Install...");
 		logger::flush();
-		return hooks::Install(*context);
+		const bool installed = hooks::Install(*context);
+		if (installed) {
+			if (const auto* messaging = SKSE::GetMessagingInterface()) {
+				messaging->RegisterListener(OnSKSEMessage);
+			} else {
+				logger::error("SKSE messaging interface unavailable; vertical lift hooks will not be installed");
+			}
+		}
+		return installed;
 	} catch (const std::exception& e) {
 		logger::critical("Exception occurred during SKSEPluginLoad: {}", e.what());
 		logger::flush();

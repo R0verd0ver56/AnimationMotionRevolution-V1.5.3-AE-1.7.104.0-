@@ -1,6 +1,7 @@
 #include "Hooks.h"
 
 #include "AnimMotionHandler.h"
+#include "VerticalMotion.h"
 #include "CharacterClipAnimMotionMap.h"
 
 #include "utils/Logger.h"
@@ -256,6 +257,20 @@ namespace hooks
 #ifdef AMR_MOTION_DIAGNOSTICS
 					trace.output = {a_translation.x, a_translation.y, a_translation.z, 0};
 #endif
+					// Vertical root motion: turn this clip's Z curve into a lift speed (VerticalMotion.h). Only clips whose
+					// curve really rises (launchers) are tracked; every other clip is left exactly as in AMR 1.5.4.
+					{
+						bool hasVerticalMotion = false;
+						for (const auto& key : *customTranslationList) {
+							if (key.delta.z >= amr::vertical::kMinRise) {
+								hasVerticalMotion = true;
+								break;
+							}
+						}
+						if (hasVerticalMotion) {
+							amr::vertical::Sample(a_character, a_clipName->c_str(), a_motionTime, a_translation, true);
+						}
+					}
 
 					return;
 				}
@@ -365,5 +380,60 @@ namespace hooks
 #ifdef AMR_MOTION_DIAGNOSTICS
 		trace.output = {a_rotation.w, a_rotation.x, a_rotation.y, a_rotation.z};
 #endif
+	}
+
+	// On-ground step, after the game and other plugins ran. While a launch curve lifts the actor: give it the lift
+	// speed and switch it to in-air for this step (the game would otherwise keep it on the ground).
+	void SimulateGroundLift(RE::bhkCharacterStateOnGround* a_this, RE::bhkCharacterController* a_characterController)
+	{
+		bhkCharacterStateOnGround::SimulateStatePhysics(a_this, a_characterController);
+		if (!a_characterController) {
+			return;
+		}
+		const float currentZ = amr::vertical::ControllerHeight(a_characterController);
+		float       velocity = 0.0F;
+		float       targetZ = 0.0F;
+		bool        logNow = false;
+		if (!amr::vertical::Command(std::addressof(a_characterController->context), currentZ, velocity, targetZ, logNow) ||
+			velocity <= 50.0F) {
+			return;
+		}
+		amr::vertical::SetZ(a_characterController->outVelocity, velocity / amr::vertical::kHavokToGame);
+		a_characterController->flags.reset(RE::CHARACTER_FLAGS::kSupport);
+		a_characterController->wantState = RE::hkpCharacterStateType::kTotal;
+		a_characterController->context.currentState = RE::hkpCharacterStateType::kInAir;
+		if (logNow) {
+			logger::info("[AMR-VZ] lift off: {:.1f} u/s, height {:.1f} -> curve {:.1f}", velocity, currentZ, targetZ);
+		}
+		// run this step as an in-air step (goes through SimulateInAirLift below)
+		amr::abi::SimulateStatePhysics(
+			skyrim_cast<RE::bhkCharacterState*>(amr::abi::RegisteredState(
+				std::addressof(a_characterController->context), RE::hkpCharacterStateType::kInAir)),
+			a_characterController);
+	}
+
+	// In-air step, after the game and other plugins ran: stay on the launch curve (rise and hover). Once the curve
+	// comes down, gravity / CGAT have the actor again.
+	void SimulateInAirLift(RE::bhkCharacterState* a_this, RE::bhkCharacterController* a_characterController)
+	{
+		bhkCharacterStateInAir::SimulateStatePhysics(a_this, a_characterController);
+		if (!a_characterController) {
+			return;
+		}
+		const float currentZ = amr::vertical::ControllerHeight(a_characterController);
+		float       velocity = 0.0F;
+		float       targetZ = 0.0F;
+		bool        logNow = false;
+		if (amr::vertical::Command(std::addressof(a_characterController->context), currentZ, velocity, targetZ, logNow)) {
+			amr::vertical::SetZ(a_characterController->outVelocity, velocity / amr::vertical::kHavokToGame);
+			if (logNow) {
+				logger::info("[AMR-VZ] in air: {:.1f} u/s, height {:.1f} -> curve {:.1f}", velocity, currentZ, targetZ);
+			}
+		}
+	}
+
+	void ClearVerticalMotion()
+	{
+		amr::vertical::ClearAll();
 	}
 }
