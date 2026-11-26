@@ -11,6 +11,8 @@
 
 #include <RE/M/MotionDataContainer.h>
 
+#include "GameABI.h"
+
 namespace hooks
 {
 	class hkbClipGenerator
@@ -100,6 +102,44 @@ namespace hooks
 		static inline REL::Relocation<std::uintptr_t> ProcessMotionData;
 		static void ResolveTargets() { ProcessMotionData = ProcessMotionDataId; }
 	};
+
+	// Vertical root motion (VerticalMotion.h): the game flattens a clip's Z curve while a character is on the ground,
+	// so launchers never lift the player. These two hooks follow the curve. They sit in the on-ground and in-air
+	// SimulateStatePhysics slots and are installed late (see InstallLateHooks) so they wrap other plugins' hooks of the
+	// same slots (CGAT's gravity / inertia).
+	class bhkCharacterStateOnGround
+	{
+	public:
+		// Resolved in InstallLateHooks, after the SKSE entry point has checked the game image (like the other targets).
+		static inline REL::Relocation<std::uintptr_t> vTable;
+		static inline REL::Relocation<void (*)(RE::bhkCharacterStateOnGround*, RE::bhkCharacterController*)> SimulateStatePhysics;
+	};
+
+	class bhkCharacterStateInAir
+	{
+	public:
+		static inline REL::Relocation<std::uintptr_t> vTable;
+		static inline REL::Relocation<void (*)(RE::bhkCharacterState*, RE::bhkCharacterController*)> SimulateStatePhysics;
+	};
+
+	void SimulateGroundLift(RE::bhkCharacterStateOnGround* a_this, RE::bhkCharacterController* a_characterController);
+	void SimulateInAirLift(RE::bhkCharacterState* a_this, RE::bhkCharacterController* a_characterController);
+	void ClearVerticalMotion();
+
+	// Installed once, just before the first save loads / new game, when every plugin has installed its own hooks.
+	inline void InstallLateHooks()
+	{
+		static bool installed = false;
+		if (installed) {
+			return;
+		}
+		installed = true;
+		bhkCharacterStateOnGround::vTable = REL::Relocation<std::uintptr_t>{ RE::VTABLE_bhkCharacterStateOnGround[0] };
+		bhkCharacterStateInAir::vTable = REL::Relocation<std::uintptr_t>{ RE::VTABLE_bhkCharacterStateInAir[0] };
+		bhkCharacterStateInAir::SimulateStatePhysics = bhkCharacterStateInAir::vTable.write_vfunc(8, SimulateInAirLift);
+		bhkCharacterStateOnGround::SimulateStatePhysics = bhkCharacterStateOnGround::vTable.write_vfunc(8, SimulateGroundLift);
+		logger::info("[AMR-VZ] vertical lift hooks installed (applied after other plugins)");
+	}
 
 	static inline std::optional<utils::ContextRegister> ValidateRuntimeLayout()
 	{
